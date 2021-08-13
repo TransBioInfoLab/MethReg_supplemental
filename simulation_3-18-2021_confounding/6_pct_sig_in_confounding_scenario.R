@@ -161,37 +161,3 @@ legend(
 write.csv (auc.all, "auc.all.csv", row.names = FALSE)
 
 
-
-## specificity - does not look good
-# spec <- subset(res.pvals.tall, beta.tf == 0 )
-# spec$specificity <- spec$accuracy
-#
-# p <- ggplot(spec, aes(x = model, y = specificity)) +
-#     geom_boxplot()
-#
-# p
-
-
-# FDRs = wrongly rejected / # of rejected
-#      = true negative & sig / sig
-
-# pdf ("fdr.pdf")
-# 
-# rejected <- subset (res.pvals.tall, sig.pval == 1)
-# 
-# rejected$false.rejected <- ifelse (rejected$beta.tf == 0, 1, 0)
-# 
-# fdr <- aggregate (false.rejected ~  model2, data = rejected, FUN = "mean")
-# 
-# fdr <- fdr[fdr$model2 != "max.rlm",]
-# 
-# p <- ggplot(fdr, aes(x = model2, y = false.rejected)) +
-#     geom_bar(stat="identity", fill = "lightblue") +
-#     geom_text(aes(label= round(false.rejected, digits = 3)), vjust = 1.6, size=3.5) +
-#     theme_bw() +
-#     labs(y= "false discovery rate", x = " ") +
-#     theme(panel.border = element_blank(), panel.grid.major = element_blank(),
-#           panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
-# p
-# 
-# dev.off()
