@@ -1,4 +1,4 @@
-# MethReg supplementary website
+# MethReg manuscript supplementary website
 
 ## Article information
 
