@@ -1,0 +1,425 @@
+---
+title: "coMethTF: Linear model for TF, gene target and TFBS DNA methylation - COAD use case"
+date: "`r Sys.Date()`"
+output: 
+  prettydoc::html_pretty:
+    theme: leonids
+    toc: true
+    df_print: paged
+    code_download: false
+    toc_depth: 3
+bibliography: bibliography.bib    
+editor_options:
+  chunk_output_type: inline    
+vignette: >
+    %\VignetteIndexEntry{coMethTF: Linear model for TF, gene target and TFBS DNA methylation - COAD use case}
+    %\VignetteEngine{knitr::rmarkdown}
+    %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(progress = FALSE, verbose = FALSE)
+```
+
+# Introduction 
+
+This use case example will analyze the Cancer Genome Atlas Colon Adenocarcinoma 
+(TCGA-COAD) data retrieved from the NCI's Genomic Data Commons (GDC)  [portal.gdc.cancer.gov](portal.gdc.cancer.gov)
+using the R package `MethReg` (`https://github.com/TransBioInfoLab/MethReg`).
+
+## Load required R libraries
+
+```{r, eval = TRUE, include = TRUE, results = "hide",message=FALSE}
+library(MethReg)
+library(dplyr)
+```
+
+```{R, include = FALSE}
+path.dropbox <- dir("~",pattern = "Dropbox",full.names = TRUE)
+path.dropbox <- "/Users/tiagosilva/TBL Dropbox/Tiago Silva/"
+path.project <- file.path(path.dropbox,"/PanCancer/MethReg-useCase/useCase1_COAD_all_chr/")
+#setwd(path.project)
+dir.create("intermediate_files", showWarnings = FALSE, recursive = TRUE)
+dir.create("results", showWarnings = FALSE, recursive = TRUE)
+dir.create("plots", showWarnings = FALSE, recursive = TRUE)
+dir.create("data", showWarnings = FALSE, recursive = TRUE)
+```
+
+# Data
+
+## Retrieving data samples 
+
+DNA methylation, gene expression, and copy number alteration will be downloaded from 
+the NCI's Genomic Data Commons (GDC) using the R/Bioconductor package `TCGAbiolinks`.
+
+```{R}
+library(TCGAbiolinks)
+dir.create("data",showWarnings = FALSE)
+```
+
+### RNA-Seq
+
+```{R, eval = FALSE}
+query.exp.hg38 <- GDCquery(
+  project = "TCGA-COAD", 
+  data.category = "Transcriptome Profiling", 
+  data.type = "Gene Expression Quantification", 
+  workflow.type = "HTSeq - FPKM-UQ"
+)
+GDCdownload(query.exp.hg38)
+rnaseq <- GDCprepare(
+  query = query.exp.hg38,
+  save = TRUE, 
+  save.filename = "data/TCGA-COAD-htseq_fpkm_uq.rda"
+)
+```
+
+### DNA methylation
+
+```{R, eval = FALSE}
+query_met.hg38 <- GDCquery(
+  project = "TCGA-COAD",
+  data.category = "DNA Methylation", 
+  platform = "Illumina Human Methylation 450"
+)
+GDCdownload(query_met.hg38)
+data.hg38 <- GDCprepare(
+  query_met.hg38,
+  save = TRUE, 
+  save.filename = "data/TCGA-COAD-DNA_methylation_COAD.rda"
+)
+```
+
+### Copy Number Variation
+
+A description of the data can be found at https://docs.gdc.cancer.gov/Data/Bioinformatics_Pipelines/CNV_Pipeline/.
+
+```{R, results = "hide", eval = FALSE}
+library(TCGAbiolinks)
+query <- GDCquery(
+  project = "TCGA-COAD",
+  data.category = "Copy Number Variation",
+  data.type = "Gene Level Copy Number Scores",              
+  access = "open"
+)
+GDCdownload(query)
+cna <- GDCprepare(
+  query,
+  save = TRUE, 
+  save.filename = "data/TCGA-COAD-CNA.rda"
+)
+```
+
+### Clinical information
+
+```{R}
+clinical.data <- GDCquery_clinic("TCGA-COAD")
+```
+
+## Retrieving saved data 
+```{r}
+dnam <- get(load("data/TCGA-COAD-DNA_methylation_COAD.rda"))
+dim(dnam)
+```
+
+
+For RNA-seq data we will only select "Primary solid Tumor" samples and 
+we will log2 transform the normalized counts `log2(FPKM-UQ + 1)`.
+
+```{R}
+rnaseq <- get(load("data/TCGA-COAD-htseq_fpkm_uq.rda")) 
+rnaseq <- rnaseq[,rnaseq$definition == "Primary solid Tumor"]
+rnaseq <- rnaseq %>% SummarizedExperiment::assay() 
+rnaseq  <- log2(rnaseq + 1)
+dim(rnaseq)
+```
+
+For copy number alteration, we will set the gene as row names, remove 
+the column `Cytoband` and modify the column names to change the `.` to `-` 
+as the other data types.
+
+```{R,eval = TRUE, include = TRUE}
+library(dplyr)
+cna <- get(load("data/TCGA-COAD-CNA.rda")) 
+cna[1:6,1:4]
+cna$`Gene ID` <- cna$Cytoband <- NULL
+genes <- gsub("\\.[0-9]*","",cna[,1,drop = TRUE])
+cna <- cna[,-1] %>% data.frame(row.names = genes)
+colnames(cna) <- gsub("\\.", "-", colnames(cna))
+dim(cna)
+```
+
+## Matching samples 
+
+We will keep only data with RNA-seq, DNA methylation, and CNA data.
+For that, we will look for the intersection of the names of the columns (samples)
+in all the three data. 
+
+```{R}
+library(dplyr)
+common.samples <- substr(colnames(rnaseq),1,16) %>%
+  intersect(substr(colnames(dnam),1,16)) %>%
+  intersect(substr(colnames(cna),1,16))
+```
+
+After we have the common samples, we will use the `match` function
+to select those samples from the original data. This will set the samples in the
+same order.
+
+```{R}
+dnam <- dnam[,match(common.samples,substr(colnames(dnam),1,16))]
+rnaseq <- rnaseq[,match(common.samples,substr(colnames(rnaseq),1,16))]
+cna <- cna[,match(common.samples,substr(colnames(cna),1,16))]
+
+colnames(dnam) <- colnames(rnaseq)  <- colnames(cna) <- common.samples
+```
+
+The final objects need to have the same number of samples, and the same sample names.
+
+```{R}
+dim(dnam)
+dnam[1:4, 1:4]
+dim(rnaseq)
+rnaseq[1:4, 1:4]
+dim(cna)
+cna[95:100, c(8:9,23:24)]
+```
+
+# Analysis
+
+## DNA methylation variance filter
+
+As we want to identify regions mainly affected by DNA methylation changes,
+we will start by filtering to those with a high variance. Using the function 
+`filter_regions_by_mean_quantile_difference` will select the regions
+with a great difference (default is 0.2) in the mean DNA methylation of samples in the highest quartile (Q4)
+compared to the lowest quartile (Q1).
+
+$$ \overline{beta_{\;Q4}} - \overline{beta_{\;Q1}} \gt 0.2$$
+
+
+```{R filter_regions_by_mean_quantile_difference}
+library(coMethTF)
+dnam <- filter_regions_by_mean_quantile_difference(
+  dnam = dnam, 
+  diff.mean.th = 0.2, 
+  cores = 4
+)
+```
+
+Although using this filter is not required, reducing the evaluated regions will reduce the computation cost.
+
+## Gene expression variance filter
+
+As we also want to identify the target gene affected by DNA methylation changes,
+we will filter genes to keep those with a high variance. Using the function 
+`filter_genes_by_quantile_mean_fold_change` will select genes
+with a great fold change (default is 1.5) of the mean expression of samples in the highest quartile (Q4)
+compared to the lowest quartile (Q1).
+
+$$ \frac{\overline{geneExp_{\;Q4}}}{\overline{geneExp_{\;Q1}}} \gt 1.5$$
+
+
+```{R}
+rnaseq <- filter_genes_by_quantile_mean_fold_change(
+  exp  = rnaseq, 
+  fold.change  = 1.5, 
+  cores = 4
+)
+```
+
+Although using this filter is not required, reducing the evaluated genes will reduce the computation cost.
+
+
+## Mapping DMR region (or CpG) to the target gene
+
+After identifying regions with DNA methylation changes, we will evaluate the impact of 
+those changes in the expression of the target genes.
+
+We first need to map the array sites (HM450/EPIC probes) to region names.
+
+```{R}
+# Mapping probes to genes
+dnam.regions <- map_probes_to_regions(
+  dnam = dnam,
+  genome = "hg38",
+  arrayType = "450k"
+)
+
+dnam[1:4, 1:4]
+probes.gr <- make_granges_from_names(rownames(dnam.regions))
+class(probes.gr)
+```
+
+
+To perform a promoter centric analysis in which we evaluate if the DNA methylation changes on gene promoter regions 
+are affecting the gene expression, we will first map each promoter region to the nearest gene using 
+the function `get_region_target_gene` with `method = "closest.gene"`.
+
+```{R}
+# Map probes to nearest gene
+mapping.closest <- get_region_target_gene(
+    regions.gr = probes.gr, 
+    genome = "hg38", 
+    method = "closest.gene"
+)
+dim(mapping.closest)
+head(mapping.closest)
+```
+
+## Correlate region DNA methylation and target gene expression
+
+After we have our tuplets promoter region/cpg and target gene, we can perform
+correlation analysis to identify which regions have DNA methylation correlated with 
+the target gene expression. This function uses a `spearman` test with 
+default cut-offs `min.cor.pval = 0.05` and `min.cor.estimate = 0` which will be used as filters.
+
+```{R}
+correlation.results.sig <- cor_region_dnam_target_gene(
+  links = mapping.closest,
+  dnam = dnam.regions, 
+  exp = rnaseq,
+  cores = 4,
+  min.cor.estimate = 0.3,
+  min.cor.pval = 0.05
+)
+dim(correlation.results.sig)
+```
+
+
+### Mapping DMR region (or CpG) to human TFs
+
+After identifying DNA methylation on regions that might be affecting target gene 
+expression, we will evaluate TF expression effect on target genes within those regions
+containing the TFBS using the function `get_tf_in_region`, which maps the regions to TF using 
+the JASPAR2018 human TF motifs. The argument `window.size` will be use to extend the region to scan
+for the motifs, for example, a `window.size` of `50` will add `25` bp 
+upstream and `25` bp downstream of the original region.
+
+```{R, results = "hide"}
+region.tf <- get_tf_in_region(
+    region = unique(correlation.results.sig$regionID), 
+    genome = "hg38",
+    cores = 4,
+    p.cutoff = 1e-8,
+    window.size = 50 # look at +-25bp around probes
+)
+dim(region.tf)
+head(region.tf)
+```
+
+Now we need to create our triplet with `regionID`, `TF` and `target`, by mergin the results from
+`get_tf_in_region` with `get_region_target_gene`.
+
+```{R}
+triplet <- dplyr::inner_join(region.tf,correlation.results.sig, by = "regionID")
+triplet[1:5,c("regionID","TF","target")]
+```
+
+## Evaluating interaction linear models
+
+The function `interaction_model` assess the regulatory impact of DNA methylation on TF regulation of target genes via two approaches: 
+
+**Model 1** (considering DNAm values as a continuous variable) - we fit a model with TF by DNA methylation interaction using all samples.
+
+$$log_2(RNA target)  \sim log_2(TF) + DNAm + log_2(TF) * DNAm$$
+
+**Model 2** (considering DNAm values as a binary variable) - we define a binary variable 
+`DNAm Group` for DNA methylation values (high = 1, low = 0). That is, samples with the 
+highest DNAm levels (top 25 percent) has high = 1, samples with lowest DNAm levels (bottom 25 pecent) has high = 0.  
+
+Note that in this implementation, only samples with DNAm values in the first and last quartiles are considered.
+
+
+```{R eval = TRUE}
+results <- interaction_model(
+    triplet = triplet, 
+    dnam = dnam.regions,
+    exp = rnaseq,
+    cores = 4
+)
+results.ordered <- results[order(results$`pval_met:rna.tf`, results$`quant_pval_metGrp:rna.tf`),]
+```
+
+```{R, plot_interaction_model, message = FALSE, results = "hide", eval = TRUE, warning = FALSE}
+metadata <- TCGAbiolinks::colDataPrepare(colnames(dnam))
+
+plots <- plot_interaction_model(
+    triplet.results = results.ordered[1:3,], 
+    dnam = dnam.regions, 
+    exp = rnaseq,
+    metadata[,"definition",drop = FALSE]
+)
+```
+
+```{R, fig.height = 14, fig.width = 12, eval = TRUE}
+plots[[1]]
+```
+
+```{R, fig.height = 14, fig.width = 12, eval = TRUE}
+plots[[2]]
+```
+
+```{R, fig.height = 14, fig.width = 12, eval = TRUE}
+plots[[3]]
+```
+
+## Evaluating stratified models  
+
+For significant triplets that are identified above, we can further assess how 
+gene regulation by TF changes when DNAm is high or low. To this end, the function 
+`stratified_model` fits two separate models (see below) to only the 
+samples in the highest DNAm levels (top 25 percent), and then to only the samples in 
+the lowest DNAm levels (bottom 25 percent), separately.
+
+$$\text{Stratified Model: } log_2(RNA target) \sim log_2(TF)$$
+
+```{R eval = TRUE}
+results.stratified <- stratified_model(
+    triplet = triplet, 
+    dnam = dnam.regions,
+    exp = rnaseq,
+    cores = 4
+)
+results.stratified.ordered <- results.stratified[order(results.stratified$DNAmhigh_pval_rna.tf, results.stratified$DNAmlow_pval_rna.tf),]
+```
+
+
+```{R, plot_stratified_model, message = FALSE, results = "hide", eval = TRUE, warning = FALSE}
+plots.stratified <- plot_stratified_model(
+    triplet.results = results.stratified.ordered[1:3,], 
+    dnam = dnam.regions, 
+    exp = rnaseq
+)
+```
+
+```{R, fig.height = 14, fig.width = 12, eval = TRUE}
+plots.stratified[[1]]
+```
+
+```{R, fig.height = 14, fig.width = 12, eval = TRUE}
+plots.stratified[[2]]
+```
+
+
+```{R, fig.height = 14, fig.width = 12, eval = TRUE}
+plots.stratified[[3]]
+```
+
+```{R, include = FALSE}
+save(
+  results.stratified,
+  rnaseq,
+  dnam,
+  dnam.regions,
+  results.ordered,
+  results.stratified.ordered, 
+  file = "results_use_case_coad.rda"
+)
+```
+
+# Session Information
+```{r, echo = FALSE, warning = FALSE, message = FALSE, cols.print = 20}
+sessionInfo()
+```
