@@ -9,3 +9,6 @@ bioRxiv 2021.02.18.431696; doi: https://doi.org/10.1101/2021.02.18.431696
 ## Code
 
 This repository contains code to perform MethReg use cases and the simulation studies as described the article.
+
+## R package
+The latest version of the MethReg R package can be accessed from Bioconductor at https://bioconductor.org/packages/release/bioc/html/MethReg.html
