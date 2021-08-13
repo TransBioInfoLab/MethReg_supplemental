@@ -159,5 +159,3 @@ legend(
 )
 
 write.csv (auc.all, "auc.all.csv", row.names = FALSE)
-
-
